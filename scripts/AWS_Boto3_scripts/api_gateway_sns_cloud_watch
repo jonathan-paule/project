@@ -1,0 +1,117 @@
+import boto3
+from openpyxl import Workbook
+
+regions = ['us-east-1', 'us-east-2', 'us-west-2']
+
+wb = Workbook()
+wb.remove(wb.active)
+
+def format_tags(tags):
+    if not tags:
+        return ""
+    return ", ".join([f"{tag['Key']}={tag['Value']}" for tag in tags])
+
+def fetch_api_gateways(region):
+    client = boto3.client('apigateway', region_name=region)
+    gateways = []
+    try:
+        response = client.get_rest_apis()
+        for api in response.get('items', []):
+            api_id = api['id']
+            arn = f"arn:aws:apigateway:{region}::/restapis/{api_id}"
+            try:
+                tags = client.get_tags(resourceArn=arn)
+                tag_str = format_tags([{'Key': k, 'Value': v} for k, v in tags.get('tags', {}).items()])
+            except:
+                tag_str = ""
+            gateways.append([
+                api.get('name', ''),
+                api_id,
+                api.get('description', ''),
+                api.get('endpointConfiguration', {}).get('types', [''])[0],
+                tag_str,
+                region
+            ])
+    except Exception as e:
+        gateways.append([f"Error in {region}: {e}"])
+    return gateways
+
+def fetch_sns_topics(region):
+    client = boto3.client('sns', region_name=region)
+    sns_list = []
+    try:
+        topics = client.list_topics().get('Topics', [])
+        for topic in topics:
+            arn = topic['TopicArn']
+            attrs = client.get_topic_attributes(TopicArn=arn)['Attributes']
+            tag_resp = client.list_tags_for_resource(ResourceArn=arn)
+            tags = format_tags(tag_resp.get('Tags', []))
+            sns_list.append([
+                arn.split(':')[-1],
+                arn,
+                attrs.get('SubscriptionsConfirmed', '0'),
+                tags,
+                region
+            ])
+    except Exception as e:
+        sns_list.append([f"Error in {region}: {e}"])
+    return sns_list
+
+def fetch_cloudwatch_alarms(region):
+    client = boto3.client('cloudwatch', region_name=region)
+    account_id = boto3.client('sts').get_caller_identity()['Account']
+    alarms = []
+    try:
+        paginator = client.get_paginator('describe_alarms')
+        for page in paginator.paginate():
+            for alarm in page['MetricAlarms']:
+                alarm_name = alarm['AlarmName']
+                metric_name = alarm.get('MetricName', '')
+                state = alarm.get('StateValue', 'UNKNOWN')
+                arn = f"arn:aws:cloudwatch:{region}:{account_id}:alarm:{alarm_name}"
+                try:
+                    tag_resp = client.list_tags_for_resource(ResourceARN=arn)
+                    tags = format_tags(tag_resp.get('Tags', []))
+                except:
+                    tags = ""
+                alarms.append([
+                    alarm_name,
+                    state,
+                    metric_name,
+                    tags,
+                    region
+                ])
+    except Exception as e:
+        alarms.append([f"Error in {region}: {e}"])
+    return alarms
+
+# Gather and write API Gateway data
+api_data = []
+for region in regions:
+    api_data.extend(fetch_api_gateways(region))
+sheet = wb.create_sheet(title="API_Gateway")
+sheet.append(['Name', 'ID', 'Description', 'Endpoint Type', 'Tags', 'Region'])
+for row in api_data:
+    sheet.append(row)
+
+# Gather and write SNS data
+sns_data = []
+for region in regions:
+    sns_data.extend(fetch_sns_topics(region))
+sheet = wb.create_sheet(title="SNS")
+sheet.append(['Topic Name', 'ARN', 'Subscription Count', 'Tags', 'Region'])
+for row in sns_data:
+    sheet.append(row)
+
+# Gather and write CloudWatch alarm data
+cw_data = []
+for region in regions:
+    cw_data.extend(fetch_cloudwatch_alarms(region))
+sheet = wb.create_sheet(title="CloudWatch_Alarms")
+sheet.append(['Alarm Name', 'State', 'Metric Name', 'Tags', 'Region'])
+for row in cw_data:
+    sheet.append(row)
+
+# Save Excel file
+wb.save("aws_api_sns_cloudwatch.xlsx")
+print("Excel file created successfully.")
